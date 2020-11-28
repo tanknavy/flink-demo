@@ -6,14 +6,18 @@ import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
 
 /**
  * Author: Alex Cheng 6/27/2020 1:57 PM
+ *  命令行操作
+ *  >./bin/flink run -c entryClass -p 2 wordcount.jar --host localhost --port 7777
+ *  >./bin/flink list //列出正在运行的job
+ *  >./bin/flink cancel running_jobs_id
  */
 
 object WordCountStream {
   def main(args: Array[String]): Unit = {
     //0.为了部署在集群中
     val params = ParameterTool.fromArgs(args) //从程序运行命令行中读取参数
-    val host:String = params.get("host", "spark3")
-    val port:Int = params.getInt("port", 7777)
+    val host:String = params.get("host", "spark3") //在UI中提交任务时指定参数 --host spark3
+    val port:Int = params.getInt("port", 7777) //在UI中 --port 7777
 
     //1.创建stream处理的执行环境
     val env = StreamExecutionEnvironment.getExecutionEnvironment //流执行环境
@@ -35,7 +39,7 @@ object WordCountStream {
     wordCountStream.print().setParallelism(1) //设置并行度，代表执行的线程数量，默认是当前电脑的core的数量
     //输出类似 3> (hello,1), 前面的数字表示slot,意思是线程的并行度，在第几个线程上面运行, 在web界面submit时可以指定默认的，程序中指定的并行度最大
 
-    //wordCountStream.writeAsCsv("/tmp/flink")
+    //wordCountStream.writeAsCsv("/tmp/flink") //写出
 
     //5.上面只是定义，启动executor
     env.execute("stream word count job")
