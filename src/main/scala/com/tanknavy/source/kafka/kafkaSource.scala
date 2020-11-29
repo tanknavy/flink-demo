@@ -15,7 +15,8 @@ import scala.util.Random
  * Author: Alex Cheng 11/28/2020 11:41 AM
  */
 
-object kafkaTest {
+//消费kafka数据，自定义数据源
+object kafkaSource {
   def main(args: Array[String]): Unit = {
     //1.创建环境
     val env = StreamExecutionEnvironment.getExecutionEnvironment
@@ -37,20 +38,24 @@ object kafkaTest {
     // 方法二spark检查点保存进来的数据，在恢复spark时手动修改offset,相当于告诉kafka从某个指定offset开始
     // 但是在flink中，flink不是像spark一批一批而是一条一条处理，而且flink是有状态的流处理，所以flink可以把kafka当前offset当做状态保存下来，flink已经实现了这些
 
+    //3.2使用自定义source
+    val mySourceStream = env.addSource(new SensorSource())
 
 
     //4.输出流
-    kafkaStream.print("kafka-stream").setParallelism(1)
+    //kafkaStream.print("kafka-stream").setParallelism(1)
+    mySourceStream.print("mySource-stream").setParallelism(1)
 
     //5.执行流处理
     env.execute("kafka-test")
 
-
   }
 }
 
+
+
 //自定义source类，实现SourceFunction接口，泛型
-class SensorSource() extends SourceFunction[SensorReading]{
+class SensorSource extends SourceFunction[SensorReading]{
   //定义flag表示数据源是否正常运行
   var running:Boolean = true
 
@@ -67,7 +72,7 @@ class SensorSource() extends SourceFunction[SensorReading]{
     //连续生成传感器数据
     while (running){ //标志位
       curTemp = curTemp.map(
-        t => (t._1, t._2 + rand.nextGaussian())
+        t => (t._1, t._2 + rand.nextGaussian()) //正态分布
       )
       //时间戳
       val curTime = System.currentTimeMillis()
@@ -78,7 +83,7 @@ class SensorSource() extends SourceFunction[SensorReading]{
       )
 
       //时间间隔
-      Thread.sleep(500)
+      Thread.sleep(rand.nextInt(50) * 100) //100毫秒到5秒间隔
     }
 
 

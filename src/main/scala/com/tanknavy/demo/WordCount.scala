@@ -8,8 +8,11 @@ import org.apache.flink.api.scala.createTypeInformation //隐式转换函数，�
 
 /**
  * Author: Alex Cheng 6/27/2020 12:50 PM
+ * 本地开发模式
  * standalone模式: 可以提交任务到UI，也可以命令行
  * >./bin/flink run -c entryClass -p 2 wordcount.jar --host localhost --port 7777
+ * yarn模式
+ * k8s模式
  */
 
 //批处理word count程序，flink有DataSet批处理，DataStream流处理
@@ -17,6 +20,7 @@ object WordCount {
   def main(args: Array[String]): Unit = {
     //1.创建batch执行环境，类似spark的SparkContext
     val env = ExecutionEnvironment.getExecutionEnvironment
+    //env.setParallelism(1) //在本地开发环境中，默认并行度是core数量个
 
     //2.从文件中读取数据，DataSet api
     val inputPath = "D:\\Code\\Java\\IDEA\\FlinkTutorial\\src\\main\\resources\\hello.txt"
