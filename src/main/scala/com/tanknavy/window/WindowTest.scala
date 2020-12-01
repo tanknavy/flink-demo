@@ -4,11 +4,12 @@ import com.tanknavy.source.bounded.SensorReading
 import org.apache.flink.api.scala.createTypeInformation
 import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor
-import org.apache.flink.streaming.api.functions.{AssignerWithPeriodicWatermarks, AssignerWithPunctuatedWatermarks}
+import org.apache.flink.streaming.api.functions.{AssignerWithPeriodicWatermarks, AssignerWithPunctuatedWatermarks, KeyedProcessFunction}
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
 import org.apache.flink.streaming.api.watermark.Watermark
 import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows
 import org.apache.flink.streaming.api.windowing.time.Time
+import org.apache.flink.util.Collector
 
 /**
  * Author: Alex Cheng 11/30/2020 2:10 PM
@@ -114,4 +115,14 @@ class MyAssigner2() extends AssignerWithPunctuatedWatermarks[SensorReading]{
   }
 
   override def extractTimestamp(t: SensorReading, previousElemTimestamp: Long): Long = t.timestamp * 1000 //需要毫秒单位
+}
+
+
+//ProcessFunction，可以获取timestamp, watermark, 生命周期的一些方法
+class MyProcess() extends KeyedProcessFunction[String, SensorReading, String]{ //key, in, out
+  //抽象类, KeyedProcessFunction[String, SensorReading, String]#Context中#Context表示 内部类
+  override def processElement(i: SensorReading, ctx: KeyedProcessFunction[String, SensorReading, String]#Context, collector: Collector[String]): Unit = {
+    //注册了一个定时器
+    ctx.timerService().registerEventTimeTimer(2000) //可以当前process time, water mark, 如果是event time, 就是指water mark的时间到这个点,
+  }
 }

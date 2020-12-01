@@ -26,7 +26,7 @@ object WordCountStream {
     //2.stream输入，接受一个socket文本流, nc -lk 7777启动netcat
     //val dataStream = env.socketTextStream("localhost",7777)
     //val dataStream = env.socketTextStream("spark3",7777)
-    val dataStream = env.socketTextStream(host,port)
+    val dataStream = env.socketTextStream(host,port) //linux:nc -lk 7777， window7：nc -lp 7777
 
     //3.对输入流的每条数据进行处理
     val wordCountStream = dataStream.flatMap(_.split(" "))
