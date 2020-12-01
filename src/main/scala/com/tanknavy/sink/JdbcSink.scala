@@ -61,17 +61,16 @@ class MyJdbcSink() extends RichSinkFunction[SensorReading]{
 
     //conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/db_example?useSSL=false&serverTimezone=UTC","hbstudent","hbstudent")
     //参数配置一,使用typesafe下的ConfigFactory
-    //conn = DriverManager.getConnection(ParamsConf.url,ParamsConf.user, ParamsConf.password)
+    conn = DriverManager.getConnection(ParamsConf.url,ParamsConf.user, ParamsConf.password)
 
     //参数配置二,使用typesafe下的Config, 使用时使用ConfigFactory.load()返回Config
     //val appConfig = new AppConfig(ConfigFactory.load())
     //conn = DriverManager.getConnection(appConfig.getUrl,appConfig.getUser, appConfig.getPassword)
 
     //参数配置三,使用ClassLoader的输入流，Properties.load(输入流)
-    //Class.forName("jdbc.driver") //加载jdbc驱动
-    Class.forName("com.mysql.jdbc.Driver") //加载jdbc驱动
+    //Class.forName("com.mysql.jdbc.Driver") //加载jdbc驱动
     //println(ConfigurationManager.getProperty("jdbc.url")) //测试
-    conn = DriverManager.getConnection(ConfigurationManager.getProperty("jdbc.url"), ConfigurationManager.getProperty("dbuser"), ConfigurationManager.getProperty("password"))
+    //conn = DriverManager.getConnection(ConfigurationManager.getProperty("jdbc.url"), ConfigurationManager.getProperty("dbuser"), ConfigurationManager.getProperty("password"))
 
     //prepare statement
     insertStmt = conn.prepareStatement("INSERT INTO flink_sensor(sensor,temp) VALUES(?,?)") //预编译语句，?占位符

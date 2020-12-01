@@ -3,6 +3,7 @@ package com.tanknavy.demo
 import org.apache.flink.api.java.utils.ParameterTool
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
+import org.apache.flink.streaming.api.windowing.time.Time
 
 /**
  * Author: Alex Cheng 6/27/2020 1:57 PM
@@ -32,6 +33,7 @@ object WordCountStream {
       .filter(_.nonEmpty) //过滤非空
       .map((_,1))
       .keyBy(0) //流中分组,stream中没有groupBy, 流中使用keyBy, 类似spark的reduceByKey
+      //.timeWindow(Time.seconds(3))
       .sum(1) //聚合
       .setParallelism(1) //flink可以在每个算子操作设定setParallelism
 
