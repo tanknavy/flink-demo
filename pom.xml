@@ -56,15 +56,22 @@
         </dependency>
 
 
-
         <dependency>
             <groupId>mysql</groupId>
             <artifactId>mysql-connector-java</artifactId>
             <version>5.1.48</version>
         </dependency>
+        <!--状态后端-->
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-statebackend-rocksdb_2.11</artifactId>
+            <version>1.7.2</version>
+        </dependency>
+
+        <!--Table api类似sql操作-->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table_2.11</artifactId>
             <version>1.7.2</version>
         </dependency>
 

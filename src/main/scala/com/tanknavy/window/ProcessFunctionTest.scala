@@ -1,14 +1,18 @@
 package com.tanknavy.window
 
 import com.tanknavy.source.bounded.SensorReading
+import org.apache.flink.api.common.functions.{FlatMapFunction, RichFlatMapFunction}
+import org.apache.flink.api.common.restartstrategy.RestartStrategies
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
-import org.apache.flink.streaming.api.TimeCharacteristic
+import org.apache.flink.api.scala.createTypeInformation
+import org.apache.flink.configuration.Configuration
+import org.apache.flink.runtime.state.filesystem.FsStateBackend
+import org.apache.flink.streaming.api.environment.CheckpointConfig.ExternalizedCheckpointCleanup
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
 import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
-import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows
 import org.apache.flink.streaming.api.windowing.time.Time
-import org.apache.flink.api.scala.createTypeInformation
-import org.apache.flink.streaming.api.functions.KeyedProcessFunction
+import org.apache.flink.streaming.api.{CheckpointingMode, TimeCharacteristic}
 import org.apache.flink.util.Collector
 
 /**
@@ -21,11 +25,26 @@ object ProcessFunctionTest {
   def main(args: Array[String]): Unit = {
     //1.环境env
     val env = StreamExecutionEnvironment.getExecutionEnvironment
+    //并行度
     env.setParallelism(1)
 
-    //event time
+    //event time而不是默认的process time
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime) //指定事件time，记得还要指定如何抽取event time
-    env.getConfig.setAutoWatermarkInterval(500L) //默认200ms周期产生watermarkL
+    env.getConfig.setAutoWatermarkInterval(500L) //默认200ms周期产生watermark
+
+    //开启流状态的checkpoint容错机制，间隔时间，参数设置
+    env.enableCheckpointing(60 * 1000) //间隔60s,
+    env.getCheckpointConfig.setCheckpointingMode(CheckpointingMode.AT_LEAST_ONCE)
+    env.getCheckpointConfig.setCheckpointTimeout(100 *1000) //超时时间
+    env.getCheckpointConfig.setFailOnCheckpointingErrors(true) //检查点错误时要停掉job吗？
+    env.getCheckpointConfig.setMaxConcurrentCheckpoints(1) //同时几个checkpoint，比如间隔太小导致检查点重叠
+    env.getCheckpointConfig.enableExternalizedCheckpoints(ExternalizedCheckpointCleanup.DELETE_ON_CANCELLATION) //job被取消时还需要保存检查点信息吗
+    env.setRestartStrategy(RestartStrategies.fixedDelayRestart(3, 500)) //尝试几次
+
+    //选择状态后端 @deprecated Use [[StreamExecutionEnvironment.setStateBackend(StateBackend)]] instead.
+    //env.setStateBackend(new MemoryStateBackend()) //有三种，状态管理和checkpoint分别在本地task jvm和远程jobManger(都内存对象), 本地 task jvm和fs(内存和文件), 本地RocksDB中(DB)
+    env.setStateBackend(new FsStateBackend("file:///e:/tmp/flink/checkpoint", false)) //状态在内存对象，检查点在fs
+
 
     //2.source文件中读取
     //实际常见是kafka source->flink->kafka sink
@@ -66,16 +85,52 @@ object ProcessFunctionTest {
 //      .window(SlidingEventTimeWindows.of(Time.seconds(15),Time.seconds(5),Time.hours(-8)))//滑动窗口, 多一个8hours的offset，时区
 //      .reduce( (d1,d2) => (d1._1, d1._2.min(d2._2)) ) //keyBy以后同分区的id一样, reduce做增量聚合，reduce后返回DataStream
 
-    //2.2.2需求: 2秒内温度连续两次上升，window开窗和reduce都不能实现时，使用更底层的ProcessFunction,它可以访问watermark
+    //业务逻辑
+    //2.2.2需求: 10s秒内温度连续两次上升，window开窗和reduce都不能实现时，使用更底层的ProcessFunction,它可以访问watermark
     val processedStream = dataStream
         .keyBy(_.id)
         .process( new TempIncreAlert() ) //keyedProcessFunction，如果温度比上次高，则创建一个1s后的timer,如果温度下降，则删除当前timer
+
+    //2.2.3需求: 两次温差超过threshold就报警，process是大招
+    val processedStream2 = dataStream
+        .keyBy(_.id)
+        .process(new TempChangeAlert(10)) //只是简单比较两次温差，有必要使用process吗
+
+    //2.2.4需求同上，温差报警，但是不用process来，使用RichFlatMapFunction,也带有状态
+    val processedStream3 = dataStream
+        .keyBy(_.id)
+        .flatMap(new TempChangeAlert2(10)) //不使用KeyedProcessFunction,而是RichFlatMapFunction,也带有状态
+
+    //2.3.5需求同上，温差报警，但是不用process来，使用RichFlatMapFunction,也带有状态
+    //体验函数式编程， 这里对初识值处理更好
+    val processedStream4 = dataStream
+        .keyBy(_.id)
+      //有状态flatMap, flatMapWithState(outType, stateType), 输出[TraversableOnce[R], Option[S]]类型 传入一个函数，对传入的元素
+        .flatMapWithState[(String, Double, Double), Double]{ //相当于flatMap(RichFlatMapFunction),flatMap无状态，flatMapWithState有状态，reduce有状态
+          //初次没有状态, 给状态赋值，返回TraversableOnce[R], Option[S]类似，这里第一次是List,和Some[]
+          case (input: SensorReading, None) =>(List.empty, Some(input.temperature)) //如果没有状态，就是没有数据来过，那么就当温度值存入状态
+          //有状态, 执行业务逻辑，更新转态，返回返回TraversableOnce[R], Option[S]
+          case (input:SensorReading, lastTemp:Some[Double]) =>
+            val diff = (input.temperature - lastTemp.get).abs
+            if (diff > 10.0) {
+              (List((input.id, lastTemp.get, input.temperature)), Some(input.temperature)) //输出类型
+            }else{
+              (List.empty,Some(input.temperature))
+            }
+        }
 
     //3. sink,使用print
     //dataStream.addSink(new MyJdbcSink())
     dataStream.print("data stream")
     //minTempPerWindowStream.print("min temp") //没有输出，原因1,默认时间窗口按照process time而不是event time, 原因2，窗口时间太长，还没来得及关窗户计算程序就结束了
-    processedStream.print("alert in 10s") //10秒内温度连续上升则报警，timer实现10秒后callback
+    processedStream.print("alert incre in 10s") //10秒内温度连续上升则报警，timer实现10秒后callback
+    //温差太大报警，使用KeyedProcessFunction
+    processedStream2.print("alert for big diff with process")
+    //温差太大报警，使用RichFlatMapFunction
+    processedStream3.print("alert for big diff with flatMap")
+    //温差太大报警，使用FlatMapWithStatus, 直接使用函数式编程
+    processedStream4.print("alert for big diff with flatMapWithState")
+
 
     //4. 执行
     env.execute("window test")
@@ -85,11 +140,14 @@ object ProcessFunctionTest {
 }
 
 
-//10秒内温度连续上升就报警: 温度比上次高，设定1后定时器，如果温度减低，删除设定的定时器
-//window和聚合函数无法实现，使用ProcessFunction，
+
+
+//传感器10秒内温度连续上升就报警: 温度比上次高，设定10后定时器，如果温度减低，删除设定的定时器
+//window和聚合函数无法实现，使用ProcessFunction，针对每个key，所以先要keyBy
+//算子状态和键控状态分别有几种数据结构，比如值状态(本类),列表状态，映射状态，聚合状态，广播状态
 class TempIncreAlert() extends KeyedProcessFunction[String, SensorReading, String]{ //[key, in, out]
 
-  //定义状态，保存上一个数据的温度值
+  //定义状态，保存上一个数据的温度值，如果不使用lazy可以在open方法生命周期中
   lazy val lastTemp : ValueState[Double] = getRuntimeContext.getState(new ValueStateDescriptor[Double]("lastTemp", classOf[Double]))//上次数据的温度作为状态
   //定义状态，保存上一个数据的event time
   lazy val lastTs : ValueState[Long] = getRuntimeContext.getState(new ValueStateDescriptor[Long]("lastTs", classOf[Long]))//上次数据的event time作为状态
@@ -118,7 +176,7 @@ class TempIncreAlert() extends KeyedProcessFunction[String, SensorReading, Strin
       currentTimer.update(timerTs) //保存定时器状态,用于删除
      //温度下降，或者第一条数据，删除定时器并清空状态
     //}else if(value.temperature < preTemp || preTemp == 0.0) { //后面preTemp == 0.0是刚启动时上次温度初始化为0.0,这时温度和0.0比较没必要设定timer
-    }else if( (value.timestamp > preTs && value.temperature < preTemp) || preTemp == 0.0) { //后面preTemp == 0.0是刚启动时上次温度初始化为0.0,这时温度和0.0比较没必要设定timer
+    }else if( (value.timestamp >= preTs && value.temperature <= preTemp) || preTemp == 0.0) { //后面preTemp == 0.0是刚启动时上次温度初始化为0.0,这时温度和0.0比较没必要设定timer
       ctx.timerService().deleteProcessingTimeTimer(curTimerTs) //删除timer
       currentTimer.clear() //删除定时器后清空定时时间戳这个状态，为下次定时时间戳做准备
     }
@@ -132,3 +190,49 @@ class TempIncreAlert() extends KeyedProcessFunction[String, SensorReading, Strin
     currentTimer.clear()//报警后，清空定时时间戳状态，为下次报警时间戳做准备
   }
 }
+
+
+//两次温度差值过大就报警: 温度比上次高，
+//window和聚合函数无法实现，使用ProcessFunction，
+//算子状态和键控状态分别有几种数据结构，比如值状态(本类),列表状态，映射状态，聚合状态，广播状态
+class TempChangeAlert(threshold: Double) extends KeyedProcessFunction[String, SensorReading, (String, Double, Double)] { //[key, in, out]
+
+  //定义一个状态，保存上次的温度值,用于process方法中和当前数据比较,
+  lazy val lastTempState : ValueState[Double] = getRuntimeContext.getState(new ValueStateDescriptor[Double]("lastTemp", classOf[Double]))
+
+  override def processElement(value: SensorReading, ctx: KeyedProcessFunction[String, SensorReading, (String, Double, Double)]#Context, out: Collector[(String, Double, Double)]): Unit = {
+    //状态中保存上次温度
+    val lastTemp = lastTempState.value()
+    val diff = (value.temperature - lastTemp).abs //scala函数式编程
+    if(diff > threshold){ //初次误报
+      out.collect((value.id, lastTemp, value.temperature)) //keyBy后的,
+    }
+    lastTempState.update(value.temperature) //记得更新最近温度状态
+  }
+}
+
+//功能同上，但不使用process，而是flatMap中使用，这里需要状态, Rich函数有状态的(getRuntimeContext.getState)
+class TempChangeAlert2(threshold:Double) extends RichFlatMapFunction[SensorReading, (String, Double, Double)]{
+
+  //定义一个状态，保存上次的温度值,用于process方法中和当前数据比较,
+  lazy val lastTempState : ValueState[Double] = getRuntimeContext.getState(new ValueStateDescriptor[Double]("lastTemp", classOf[Double]))
+  //也可使使用生命周期方法open初始化lastTempState
+  private var lastTempState2: ValueState[Double] = _ //在open中初始化
+
+
+  override def flatMap(value: SensorReading, out: Collector[(String, Double, Double)]): Unit = { //in, out
+    //状态中保存上次温度
+    val lastTemp = lastTempState.value()
+    val diff = (value.temperature - lastTemp).abs //scala函数式编程
+    if(diff > threshold){ //初次误报
+      out.collect((value.id, lastTemp, value.temperature)) //keyBy后的,
+    }
+    lastTempState.update(value.temperature) //记得更新最近温度状态
+  }
+
+  override def open(parameters: Configuration): Unit = {
+    //和上面lazy 延迟赋值效果完全一样
+    lastTempState2 = getRuntimeContext.getState(new ValueStateDescriptor[Double]("lastTemp2", classOf[Double]))
+  }
+}
+

@@ -20,6 +20,9 @@ object TransformTest {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
 
     env.setParallelism(1) //在本地开发环境中，默认并行度是core数量个
+    //实际常见是kafka source->flink->kafka sink
+    //socket数据流
+    //val socketStream = env.socketTextStream("localhost", 7777) //linux:nc -lk 7777， window7：nc -lp 7777
     val streamFromFile = env.readTextFile("D:\\Code\\Java\\IDEA\\FlinkTutorial\\src\\main\\resources\\sensor.txt")
 
 
@@ -43,7 +46,7 @@ object TransformTest {
     // split：DataStream-> SplitStream
     // select:SplitStream-> DataStream
     //比如温度传感器分成两个流(以30度分界)
-    val splitStream = dataStream.split(data =>{
+    val splitStream = dataStream.split(data =>{ //流split启用，推荐使用side output
       if (data.temperature > 30) Seq("high30") else Seq("low30")
     })
 
