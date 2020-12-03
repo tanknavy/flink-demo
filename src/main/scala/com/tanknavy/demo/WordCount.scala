@@ -1,6 +1,6 @@
 package com.tanknavy.demo
 
-import org.apache.flink.api.scala.ExecutionEnvironment
+import org.apache.flink.api.scala.{DataSet, ExecutionEnvironment}
 import org.apache.flink.core.fs.FileSystem
 //import org.apache.flink.api.scala._
 import org.apache.flink.api.scala.createTypeInformation //隐式转换函数，将输入数据转成TypeInformation[T]
@@ -24,7 +24,7 @@ object WordCount {
 
     //2.从文件中读取数据，DataSet api
     val inputPath = "D:\\Code\\Java\\IDEA\\FlinkTutorial\\src\\main\\resources\\hello.txt"
-    val inputDataSet = env.readTextFile(inputPath) //返回DataSet[String]
+    val inputDataSet: DataSet[String] = env.readTextFile(inputPath) //返回DataSet[String]
 
     //3.数据处理
     val wordCountDataSet = inputDataSet.flatMap(_.split(" ")) //每一行的切分成一个word

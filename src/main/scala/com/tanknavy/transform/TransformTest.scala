@@ -60,7 +60,7 @@ object TransformTest {
     println("-------------------------------------------------")
 
 
-    //3.多流合并
+    //3.多流合并， connect/CoMap/Union
     // Connect: DataStream,DataStream ->ConnectedStreams, 流数据类型可以不一样，一次两条流，同流但不合污，一国两制
     // CoMap, CoFlatMap: ConnectedStreams -> DataStream //
     // Union: DataStream, DataStream ->DataStream //包含所有DataStream的元素的新DataStream, 流数据类型必须一样，可以多条流合并

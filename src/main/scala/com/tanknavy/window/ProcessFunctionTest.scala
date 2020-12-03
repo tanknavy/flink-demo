@@ -1,7 +1,7 @@
 package com.tanknavy.window
 
 import com.tanknavy.source.bounded.SensorReading
-import org.apache.flink.api.common.functions.{FlatMapFunction, RichFlatMapFunction}
+import org.apache.flink.api.common.functions.{AggregateFunction, FlatMapFunction, RichFlatMapFunction}
 import org.apache.flink.api.common.restartstrategy.RestartStrategies
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
 import org.apache.flink.api.scala.createTypeInformation
@@ -11,7 +11,10 @@ import org.apache.flink.streaming.api.environment.CheckpointConfig.ExternalizedC
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction
 import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
+import org.apache.flink.streaming.api.scala.function.WindowFunction
+import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows
 import org.apache.flink.streaming.api.windowing.time.Time
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow
 import org.apache.flink.streaming.api.{CheckpointingMode, TimeCharacteristic}
 import org.apache.flink.util.Collector
 
@@ -56,6 +59,7 @@ object ProcessFunctionTest {
 
     //自定义类型数据源
     //val mySourceStream: DataStream[SensorReading] = env.addSource(new SensorSource()) //自定义数据源
+
     //2.1.基本转换算子和简单聚合算子, keyBy: DataStream -> KeyedStream, 然后可以agg/reduce
     //val dataStream = streamFromFile.map(
     val dataStream = socketStream.map(
@@ -66,7 +70,7 @@ object ProcessFunctionTest {
         //SensorReading(dataArray(0).trim, dataArray(1).trim.toLong, dataArray(2).trim.toDouble).toString //为了方便序列化写到kafka
         SensorReading(dataArray(0).trim, dataArray(1).trim.toLong, dataArray(2).trim.toDouble)
       })
-      //三种格式的time assigner,使用event time时如果使用 time assingner产生watermark
+      //水位线，三种格式的time assigner,使用event time时如果使用 time assingner产生watermark
       //.assignAscendingTimestamps(_.timestamp * 1000) //数据升序时，就不用watermark延迟触发，传入一个时间戳抽取器(毫秒)，到时间就触发不用延迟！
       .assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor[SensorReading](Time.seconds(1)) { //数据乱序，传入等待时间, wm = maxEventTs - waitTime
         override def extractTimestamp(t: SensorReading): Long = t.timestamp * 1000
@@ -75,15 +79,18 @@ object ProcessFunctionTest {
 
     //2.2开窗,时间窗口[)左边包括，右边不包含,使用window和聚合处理，单这些不能实现业务时，使用更底层的ProcessFunction,
     //2.2.1需求：15秒滑动窗口最小温度
-//    val minTempPerWindowStream = dataStream
-//      .map( data =>(data.id,data.temperature))
-//      .keyBy(_._1) //keyBy在water mark分配之后，
-//      //几种window用法示例
-//      //.timeWindow(Time.seconds(10))//10秒的滚动窗口,是window的简写
-//      //.timeWindow(Time.milliseconds(20))//毫秒单位，是window的简写
-//      //.timeWindow(Time.seconds(15),Time.seconds(5))//滑动窗口,15s内，每隔5s
-//      .window(SlidingEventTimeWindows.of(Time.seconds(15),Time.seconds(5),Time.hours(-8)))//滑动窗口, 多一个8hours的offset，时区
-//      .reduce( (d1,d2) => (d1._1, d1._2.min(d2._2)) ) //keyBy以后同分区的id一样, reduce做增量聚合，reduce后返回DataStream
+    val minTempPerWindowStream = dataStream //DataStream[SensorReading]
+      .map( data =>(data.id,data.temperature))
+      .keyBy(_._1) //keyBy在water mark分配之后，
+      //几种window用法示例
+      //.timeWindow(Time.seconds(10))//10秒的滚动窗口,是window的简写
+      //.timeWindow(Time.milliseconds(20))//毫秒单位，是window的简写
+      //.timeWindow(Time.seconds(15),Time.seconds(5))//滑动窗口,15s内，每隔5s
+      .window(SlidingEventTimeWindows.of(Time.seconds(15),Time.seconds(5),Time.hours(-8)))//滑动窗口, 多一个8hours的offset，时区
+      .reduce( (d1,d2) => (d1._1, d1._2.min(d2._2)) ) //keyBy以后同分区的id一样, reduce做增量聚合，reduce后返回DataStream
+      //.aggregate( new CountAgge(), new WindowResultFunction()) //除了reduce类似的增量聚合还有全窗口聚合,两个参数，一个聚合规则，一个输出数据结构
+      //.apply()
+      //.process() //大招
 
     //业务逻辑
     //2.2.2需求: 10s秒内温度连续两次上升，window开窗和reduce都不能实现时，使用更底层的ProcessFunction,它可以访问watermark
@@ -236,3 +243,22 @@ class TempChangeAlert2(threshold:Double) extends RichFlatMapFunction[SensorReadi
   }
 }
 
+
+//aggregate全窗口聚合用,累加器
+class CountAgge2() extends AggregateFunction[SensorReading, Long, Long]{ //in, acc, out
+  override def createAccumulator(): Long = ???
+
+  override def add(in: SensorReading, acc: Long): Long = ???
+
+  override def getResult(acc: Long): Long = ???
+
+  override def merge(acc: Long, acc1: Long): Long = ???
+}
+
+
+//aggregate全窗口聚合用, apply定了要输出的数据类型
+class WindowResultFunction2() extends WindowFunction[Long, Long, String, TimeWindow]{ //in, out, key,W
+  override def apply(key: String, window: TimeWindow, input: Iterable[Long], out: Collector[Long]): Unit = {
+
+  }
+}

@@ -30,7 +30,7 @@ object WindowTest {
     //2.source文件中读取
     //实际常见是kafka source->flink->kafka sink
     //socket数据流
-    val socketStream = env.socketTextStream("localhost", 7777) //nc -lk 7777
+    val socketStream = env.socketTextStream("localhost", 7777) //linux:nc -lk 7777， window7：nc -lp 7777
 
     //文本文件数据源
     val streamFromFile = env.readTextFile("D:\\Code\\Java\\IDEA\\FlinkTutorial\\src\\main\\resources\\sensor.txt")
@@ -39,19 +39,22 @@ object WindowTest {
     //val mySourceStream: DataStream[SensorReading] = env.addSource(new SensorSource()) //自定义数据源
     //2.1.基本转换算子和简单聚合算子, keyBy: DataStream -> KeyedStream, 然后可以agg/reduce
     val dataStream = streamFromFile.map(
+    //val dataStream = socketStream.map(
       //val dataStream = mySourceStream.map(
       //val dataStream = kafkaStream.map(
       data => {
         val dataArray = data.split(",")
         //SensorReading(dataArray(0).trim, dataArray(1).trim.toLong, dataArray(2).trim.toDouble).toString //为了方便序列化写到kafka
-        SensorReading(dataArray(0).trim, dataArray(1).trim.toLong, dataArray(2).trim.toDouble)
+
+          SensorReading(dataArray(0).trim, dataArray(1).trim.toLong, dataArray(2).trim.toDouble)
+
       })
       //三种格式的time assigner,使用event time时如果使用 time assingner产生watermark
       //.assignAscendingTimestamps(_.timestamp * 1000) //数据升序时，就不用watermark延迟触发，传入一个时间戳抽取器(毫秒)，到时间就触发不用延迟！
-      .assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor[SensorReading](Time.seconds(1)) { //数据乱序，传入等待时间, wm = maxEventTs - waitTime
+      .assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor[SensorReading](Time.seconds(1)) { //数据乱序1，传入等待时间, wm = maxEventTs - waitTime
         override def extractTimestamp(t: SensorReading): Long = t.timestamp * 1000
       })
-      //.assignTimestampsAndWatermarks( new MyAssigner) //数据乱序，自定义time assigner
+      //.assignTimestampsAndWatermarks( new MyAssigner) //数据乱序2，自定义time assigner
 
     //2.2开窗,时间窗口[)左边包括，右边不包含
     //需求：15秒滑动窗口最小温度
@@ -61,7 +64,7 @@ object WindowTest {
       //.timeWindow(Time.seconds(10))//10秒的滚动窗口,是window的简写
       //.timeWindow(Time.milliseconds(20))//毫秒单位，是window的简写
       //.timeWindow(Time.seconds(15),Time.seconds(5))//滑动窗口,15s内，每隔5s
-      .window(SlidingEventTimeWindows.of(Time.seconds(15),Time.seconds(5),Time.hours(-8)))//滑动窗口, 多一个8hours的offset，时区
+      .window(SlidingEventTimeWindows.of(Time.seconds(10),Time.seconds(5),Time.hours(-8)))//滑动窗口, 多一个8hours的offset，时区
       .reduce( (d1,d2) => (d1._1, d1._2.min(d2._2)) ) //keyBy以后同分区的id一样, reduce做增量聚合，reduce后返回DataStream
 
 
@@ -102,6 +105,8 @@ class MyAssigner extends AssignerWithPeriodicWatermarks[SensorReading]{
     t.timestamp * 1000 //毫秒单位，源数据是秒
   }
 }
+
+
 
 //非周期性的watermark生成
 class MyAssigner2() extends AssignerWithPunctuatedWatermarks[SensorReading]{
