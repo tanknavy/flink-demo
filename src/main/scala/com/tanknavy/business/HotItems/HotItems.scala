@@ -1,8 +1,10 @@
 package com.tanknavy.business.HotItems
 
 import java.sql.Timestamp
+import java.util.Properties
 
 import org.apache.flink.api.common.functions.AggregateFunction
+import org.apache.flink.api.common.serialization.SimpleStringSchema
 import org.apache.flink.api.common.state.{ListState, ListStateDescriptor}
 import org.apache.flink.api.scala.createTypeInformation
 import org.apache.flink.configuration.Configuration
@@ -13,6 +15,7 @@ import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
 import org.apache.flink.streaming.api.scala.function.WindowFunction
 import org.apache.flink.streaming.api.windowing.time.Time
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow
+import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer011
 import org.apache.flink.util.Collector
 
 import scala.collection.mutable.ListBuffer
@@ -48,20 +51,36 @@ object HotItems {
 
     //2.source文件中读取
     //实际生产环境是kafka source->flink->kafka sink
-    //socket数据流
+    //2.1socket数据流
     //val socketStream = env.socketTextStream("localhost", 7777) //linux:nc -lk 7777， window7：nc -lp 7777
 
-    //文本文件数据源
-    val streamFromFile = env.readTextFile("D:\\Code\\Java\\IDEA\\FlinkTutorial\\src\\main\\resources\\UserBehavior.csv")
+    //2.2文本文件数据源
 
-    //自定义类型数据源
+    //val streamFromFile = env.readTextFile("D:\\Code\\Java\\IDEA\\FlinkTutorial\\src\\main\\resources\\UserBehavior.csv")
+    val resource = getClass.getResource("/UserBehavior.csv") //文件使用相对路径
+    val streamFromFIle = env.readTextFile(resource.getPath)
+
+    //2.3自定义类型数据源
     //val mySourceStream: DataStream[SensorReading] = env.addSource(new SensorSource()) //自定义数据源
 
-    //2.1.基本转换算子和简单聚合算子, keyBy: DataStream -> KeyedStream, 然后可以agg/reduce
-    val dataStream = streamFromFile.map(
+    //2.4.配置kafka consumer client
+    val props = new Properties()
+    props.setProperty("bootstrap.servers", "localhost:9092")
+    props.setProperty("group.id", "consumer-flink") //消费组
+    props.setProperty("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer")
+    props.setProperty("value.deserializer", "org.apache.kafka.common.serializations.StringDeserializer")
+    props.setProperty("auto.offset.reset","latest") //偏移量自动重置
+
+    //2.4.1消费kafka数据源，addSource()
+    val kafkaStream = env.addSource(new FlinkKafkaConsumer011[String]("orderLog",
+      new SimpleStringSchema(),props)) //kafka-topic, valueDeserializer, props
+
+
+    //3.1.基本转换算子和简单聚合算子, keyBy: DataStream -> KeyedStream, 然后可以agg/reduce
+    //val dataStream = streamFromFile.map(
     //val dataStream = socketStream.map(
       //val dataStream = mySourceStream.map(
-      //val dataStream = kafkaStream.map(
+      val dataStream = kafkaStream.map(
       data => {
         val dataArray = data.split(",")
         //SensorReading(dataArray(0).trim, dataArray(1).trim.toLong, dataArray(2).trim.toDouble).toString //为了方便序列化写到kafka
@@ -74,8 +93,8 @@ object HotItems {
       //})
       //.assignTimestampsAndWatermarks( new MyAssigner) //数据乱序2，自定义time assigner
 
-    //2.2开窗,时间窗口[)左边包括，右边不包含,使用window和聚合处理，单这些不能实现业务时，使用更底层的ProcessFunction,
-    //2.2.1需求，热门商品top N
+    //3.2开窗,时间窗口[)左边包括，右边不包含,使用window和聚合处理，单这些不能实现业务时，使用更底层的ProcessFunction,
+    //3.2.1需求，热门商品top N
     val hotPerWindowStream = dataStream //DataStream[SensorReading]
         //.filter( _.behavior == "pv")
       //.map( data =>(data.itemId, 1))
@@ -93,22 +112,22 @@ object HotItems {
       .process(new TopHotItem(3)) //窗口内排序
 
     //业务逻辑
-    //2.2.2需求: 10s秒内温度连续两次上升，window开窗和reduce都不能实现时，使用更底层的ProcessFunction,它可以访问watermark
+    //3.2.2需求: 10s秒内温度连续两次上升，window开窗和reduce都不能实现时，使用更底层的ProcessFunction,它可以访问watermark
    /* val processedStream = dataStream
       .keyBy(_.id)
       .process( new TempIncreAlert() ) //keyedProcessFunction，如果温度比上次高，则创建一个1s后的timer,如果温度下降，则删除当前timer
 
-    //2.2.3需求: 两次温差超过threshold就报警，process是大招
+    //3.2.3需求: 两次温差超过threshold就报警，process是大招
     val processedStream2 = dataStream
       .keyBy(_.id)
       .process(new TempChangeAlert(10)) //只是简单比较两次温差，有必要使用process吗
 
-    //2.2.4需求同上，温差报警，但是不用process来，使用RichFlatMapFunction,也带有状态
+    //3.2.4需求同上，温差报警，但是不用process来，使用RichFlatMapFunction,也带有状态
     val processedStream3 = dataStream
       .keyBy(_.id)
       .flatMap(new TempChangeAlert2(10)) //不使用KeyedProcessFunction,而是RichFlatMapFunction,也带有状态
 
-    //2.3.5需求同上，温差报警，但是不用process来，使用RichFlatMapFunction,也带有状态
+    //3.3.5需求同上，温差报警，但是不用process来，使用RichFlatMapFunction,也带有状态
     //体验函数式编程， 这里对初识值处理更好
     val processedStream4 = dataStream
       .keyBy(_.id)
@@ -126,7 +145,7 @@ object HotItems {
           }
       }
 */
-    //3. sink,使用print
+    //4. sink,使用print
     //dataStream.addSink(new MyJdbcSink())
     //dataStream.print("data stream")
 
@@ -140,7 +159,7 @@ object HotItems {
 //    processedStream4.print("alert for big diff with flatMapWithState")
 
 
-    //4. 执行
+    //5. 执行
     env.execute("hot item analysis")
   }
 }
@@ -183,8 +202,12 @@ class AverageAgg() extends AggregateFunction[UserBehavior, (Long, Int), Double]{
 //keyedStream， 分组后liststate保存每个窗口全部元素作为状态， 按照windowEnd时间注册定时器，定时器中对liststate排序求topN
 class TopHotItem(topN: Int) extends KeyedProcessFunction[Long, ItemViewCount, String]{
 
+  //状态定义和初始化方法一，在生命周期open中
   private var itemState: ListState[ItemViewCount] = _
+  //状态定义和初始化方法二，lazy懒加载，需要时再定义
+  //lazy val itemState2: ListState[ItemViewCount] = getRuntimeContext.getListState(new ListStateDescriptor[ItemViewCount]("item-states", classOf[ItemViewCount]))
 
+  //key, in, out,
   override def processElement(value: ItemViewCount, ctx: KeyedProcessFunction[Long, ItemViewCount, String]#Context, collector: Collector[String]): Unit = {
     //把每条数据存入状态列表，窗口关闭时排序取topN,为啥不用TreeMap,
     itemState.add(value) //追加一个元素
