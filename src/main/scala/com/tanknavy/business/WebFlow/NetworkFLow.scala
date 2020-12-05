@@ -120,7 +120,7 @@ object NetworkFLow {
       //.window(SlidingEventTimeWindows.of(Time.seconds(15),Time.seconds(5),Time.hours(-8)))//滑动窗口, 多一个8hours的offset，时区
       //.reduce( (d1,d2) => (d1._1, d1._2 + d2._2 )) //keyBy以后同分区的id一样, reduce做增量聚合，reduce后返回DataStream
       //这里除了做聚合, 还想指定输出格式, 使用aggregate,有几种形式，这里（预聚合，窗口函数），后面还要排序
-      .aggregate( new CountAggUrl(), new WindowResultFunctionUrl() ) //除了reduce类似的增量聚合还有全窗口聚合,两个参数，一个聚合规则，一个输出数据结构
+      .aggregate( new CountAggUrl(), new WindowResultFunctionUrl() ) //预聚合，除了reduce类似的增量聚合还有全窗口聚合,两个参数，一个聚合规则，一个输出数据结构
       .keyBy(_.windowEnd)//按照每个时间窗口分区
       //.apply()
       .process(new TopHotUrl(3)) //窗口内排序
@@ -186,7 +186,8 @@ class CountAggUrl() extends AggregateFunction[ApacheLogEvent, Long, Long]{ //in,
 
 
 //自定义窗口函数，计算ItemViewCount, 将CountAgge的输出包装成需要的格式
-//aggregate全窗口聚合用, apply定了要输出的数据类型， 上述的输出就是这里的输入
+//aggregate全窗口聚合用, apply定了要输出的数据类型， 上述AggregateFunction的输出就是这里的输入
+//注意:WindowFunction容易倒错包
 class WindowResultFunctionUrl() extends WindowFunction[Long, UrlViewCount, String, TimeWindow]{ //in, out, key(由于是keyedStream[T,JavaTuple]), Window
 
   override def apply(key: String, window: TimeWindow, input: Iterable[Long], out: Collector[UrlViewCount]): Unit = {
@@ -223,7 +224,6 @@ class TopHotUrl(topN: Int) extends KeyedProcessFunction[Long, UrlViewCount, Stri
     //注册一个定时器，
     ctx.timerService().registerEventTimeTimer(value.windowEnd + 100) //每个item带有窗口结束时间，加个延时，确保数据都到
   }
-
 
   override def open(parameters: Configuration): Unit = {
     itemState = getRuntimeContext.getListState(new ListStateDescriptor[UrlViewCount]("url-states", classOf[UrlViewCount]))

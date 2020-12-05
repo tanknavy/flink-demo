@@ -106,8 +106,8 @@ object UserViewBoomFilter {
       //.aggregate( new CountAgge(), new WindowResultFunction() ) //除了reduce类似的增量聚合还有全窗口聚合,两个参数，一个聚合规则，一个输出数据结构
       //.keyBy(_.windowEnd)//按照每个时间窗口分区
       //.apply( new UvCountByWindow() ) //聚合操作
-        .trigger(new MyTrigger()) //不等到窗口关闭时操作聚合函数，而是主动触发关窗操作
-      .process(new UvCountWithBloom()) //窗口内排序
+        .trigger(new MyTriggerBatch()) //不等到窗口关闭时操作聚合函数，而是主动触发关窗操作
+      .process(new UvCountWithBloomBatch()) //窗口内排序
 
 
     //业务逻辑
@@ -161,17 +161,24 @@ object UserViewBoomFilter {
 
 //触发窗口的计算操作，而不是等窗口关闭，结合布隆过滤器，来一个元素查重并更新count,然后清理该元素
 // TriggerResult.FIRE_AND_PURGE这样flink不用一个window内存储全部元素而是来一个计算一个
-class MyTrigger() extends  Trigger[(String,Long), TimeWindow]{ //input(dummyKey, userId), window
-  //val batchSize = 10
-  //var index = 0//发现这个trigger不是每个窗口初始化的，而是整个公用,我需要的是by Window内攒一小批
+class MyTriggerBatch() extends  Trigger[(String,Long), TimeWindow]{ //input(dummyKey, userId), window
+  val batchSize = 10
+  var index = 0//发现这个trigger不是每个窗口初始化的，而是整个公用,我需要的是by Window内攒一小批
   //val random = new Random()
   //random.nextInt(10)
   override def onElement(t: (String, Long), l: Long, w: TimeWindow, triggerContext: Trigger.TriggerContext): TriggerResult = {
     //每来一条数据，就触发窗口操作，并清空窗口状态
     //TriggerResult.FIRE_AND_PURGE
-      //println("index: " + index + ",测试一次处理一批头")
+    //减少每个数据都读写redis，考虑比如攒到一批100个再触发一次？
+    if (index % batchSize == 0){ //攒一批处理一次
+      index += 1
+      println("index: " + index + ",测试一次处理一批头")
       TriggerResult.FIRE_AND_PURGE
-
+    }else{
+      //println("测试一次处理一批其它")
+      index += 1
+      TriggerResult.CONTINUE //继续攒
+    }
 
   }
 
@@ -179,7 +186,7 @@ class MyTrigger() extends  Trigger[(String,Long), TimeWindow]{ //input(dummyKey,
 
   override def onEventTime(l: Long, w: TimeWindow, triggerContext: Trigger.TriggerContext): TriggerResult = TriggerResult.CONTINUE
 
-  override def clear(w: TimeWindow, triggerContext: Trigger.TriggerContext): Unit = {}
+  override def clear(w: TimeWindow, triggerContext: Trigger.TriggerContext): Unit = {index = 0}
 }
 
 //布隆过滤器，bitmap多大
@@ -200,7 +207,7 @@ class Bloom(size: Long) { //int就可以代表20亿
 
 //每来一个数据就要和redis拿当前窗口的bitmap比对，并更新count
 // >hgetall UvCount
-class UvCountWithBloom() extends ProcessWindowFunction[(String, Long), UvCount, String, TimeWindow]{ //in, out, key, window
+class UvCountWithBloomBatch() extends ProcessWindowFunction[(String, Long), UvCount, String, TimeWindow]{ //in, out, key, window
 //class UvCountWithBloom() extends ProcessAllWindowFunction[Long, UvCount, TimeWindow]{ //in, out, window, 没有keyBy就没有key
   //定义redis连接
   lazy val jedis = new Jedis("localhost",6379) //jeids client
@@ -220,17 +227,17 @@ class UvCountWithBloom() extends ProcessWindowFunction[(String, Long), UvCount, 
 
     //布隆过滤器判断是否存在，process中参数iterable是当前窗口目前的元素集合，但是窗口做了trigger，TriggerResult.FIRE_AND_PURGE,来一条处理一条并清理
     //结合trigger逐个处理时，无需以下的for循环
-    val userId = elements.last._2.toString //当前窗口的元素集合最后一个元素(dummyKey, userId)，一次处理一个元素，效率有点低呀
+    //val userId = elements.last._2.toString //当前窗口的元素集合最后一个元素(dummyKey, userId)，一次处理一个元素，效率有点低呀
 
     //结合trigger批次处理时，增加循环判断，最后一点不足batchSize的会在关窗时被处理吗,重复处理
-    //val userIdBatch: Iterable[(String, Long)] = elements.take(10) //trigger.FIRE_AND_PURGE中一次攒100个，这个一次处理100个，
-    //println("当前窗口内元素个数：" +  elements.size + ",当前批次内元素个数：" + userIdBatch.size)
-    //for( item <- userIdBatch){
-//      if(jedis.hget("UvCount", storeKey) !=null){
-//        count = jedis.hget("UvCount", storeKey).toLong //storeKey是WindowEnd
-//      }
+    val userIdBatch: Iterable[(String, Long)] = elements.take(10) //trigger.FIRE_AND_PURGE中一次攒100个，这个一次处理100个，
+    println("当前窗口内元素个数：" +  elements.size + ",当前批次内元素个数：" + userIdBatch.size)
+    for( item <- userIdBatch){
+      if(jedis.hget("UvCount", storeKey) !=null){
+        count = jedis.hget("UvCount", storeKey).toLong //storeKey是WindowEnd
+      }
       //逐个处理
-      //val userId = item._2.toString //当前窗口的元素集合最后一个元素(dummyKey, userId)，一次处理一个元素，效率有点低呀
+      val userId = item._2.toString //当前窗口的元素集合最后一个元素(dummyKey, userId)，一次处理一个元素，效率有点低呀
       //println(item)
       val offset = bloom.hash(userId, 34) //userId哈希，结果是29位二进制内的
       //定义一个标识位，判断redis位置是否有这一个位
@@ -248,7 +255,7 @@ class UvCountWithBloom() extends ProcessWindowFunction[(String, Long), UvCount, 
         out.collect(UvCount(storeKey.toLong, count)) //只打印，不更新数据
       }
 
-    //}
+    }
 
 
 

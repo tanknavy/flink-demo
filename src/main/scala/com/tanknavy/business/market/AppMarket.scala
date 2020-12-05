@@ -1,26 +1,33 @@
-package com.tanknavy.business.HotItems
+package com.tanknavy.business.market
 
+import java.lang
+import java.sql.Timestamp
 import java.util.Properties
 
+import org.apache.flink.api.common.functions.AggregateFunction
 import org.apache.flink.api.common.serialization.SimpleStringSchema
 import org.apache.flink.api.scala.createTypeInformation
 import org.apache.flink.runtime.state.filesystem.FsStateBackend
 import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
-import org.apache.flink.streaming.api.scala.function.AllWindowFunction
+import org.apache.flink.streaming.api.scala.function.WindowFunction
+//import org.apache.flink.streaming.api.scala.function.WindowFunction
 import org.apache.flink.streaming.api.windowing.time.Time
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer011
 import org.apache.flink.util.Collector
 
 /**
- * Author: Alex Cheng 12/3/2020 7:40 PM
+ * Author: Alex Cheng 12/4/2020 12:40 PM
  */
 
-case class UvCount(windowEnd:Long, count:Long)
+//app 渠道分析
+//输入数据样例类
+//case class MarketingUserBehavior(userId:String, behavior: String, channel: String, timestamp:Long)
+//输出结果样例类
+//case class MarketingViewCount(windowStart:String, windowEnd:String, channel:String, behavior:String, count:Long)
 
-//User View, 关键点在去重
-object UserView {
+object AppMarket {
   def main(args: Array[String]): Unit = {
     //1.环境env
     val env = StreamExecutionEnvironment.getExecutionEnvironment
@@ -50,7 +57,7 @@ object UserView {
     val streamFromFile = env.readTextFile(resource.getPath())
 
     //2.3自定义类型数据源
-    //val mySourceStream: DataStream[SensorReading] = env.addSource(new SensorSource()) //自定义数据源
+    val mySourceStream = env.addSource(new SimulatedEventSource()) //自定义数据源
 
     //2.4.配置kafka consumer client
     val props = new Properties()
@@ -66,42 +73,48 @@ object UserView {
 
 
     //3.1.基本转换算子和简单聚合算子, keyBy: DataStream -> KeyedStream, 然后可以agg/reduce
-    val dataStream = streamFromFile.map(
+      //val dataStream = streamFromFile.map(
       //val dataStream = socketStream.map(
-      //val dataStream = mySourceStream.map(
-      //val dataStream = kafkaStream
-      data => {
-        val dataArray = data.split(",")
-        //SensorReading(dataArray(0).trim, dataArray(1).trim.toLong, dataArray(2).trim.toDouble).toString //为了方便序列化写到kafka
-        UserBehavior(dataArray(0).trim.toLong, dataArray(1).trim.toLong, dataArray(2).trim.toInt, dataArray(3).trim, dataArray(4).trim.toLong)
-      })
+//      val dataStream = mySourceStream.map(
+//      //val dataStream = kafkaStream
+//      data => {
+//        val dataArray = data.split(",")
+//        //SensorReading(dataArray(0).trim, dataArray(1).trim.toLong, dataArray(2).trim.toDouble).toString //为了方便序列化写到kafka
+//        UserBehavior(dataArray(0).trim.toLong, dataArray(1).trim.toLong, dataArray(2).trim.toInt, dataArray(3).trim, dataArray(4).trim.toLong)
+//      })
+      val dataStream = mySourceStream //无需map的数据源
       //watermark 三种格式的time assigner(升序，乱序),使用event time时如果使用 time assingner产生watermark
-      .assignAscendingTimestamps(_.timestamp * 1000L) //数据升序时，就不用watermark延迟触发，传入一个时间戳抽取器(毫秒)，到时间就触发不用延迟！
+      .assignAscendingTimestamps(_.timestamp) //数据升序时，就不用watermark延迟触发，传入一个时间戳抽取器(毫秒)，到时间就触发不用延迟！
     //.assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor[SensorReading](Time.seconds(1)) { //数据乱序1，传入等待时间, wm = maxEventTs - waitTime
     //  override def extractTimestamp(t: SensorReading): Long = t.timestamp * 1000
     //})
     //.assignTimestampsAndWatermarks( new MyAssigner) //数据乱序2，自定义time assigner
 
     //3.2开窗,时间窗口[)左边包括，右边不包含,使用window和聚合处理，单这些不能实现业务时，使用更底层的ProcessFunction,
-    //3.2.1需求，窗口内UV统计，需要去重，无需keyBy
+    // keyBy和TimeWindow顺序不一样，后面的聚合可能也不一样
+    //3.2.1需求,
     val hotPerWindowStream = dataStream //DataStream[SensorReading]
-      .filter( _.behavior == "pv")
-      //.map( data =>("pv", 1)) //统计全部页面的
-      //.keyBy(_._1) //keyBy在watermark分配之后，keyBy以后开窗就是WindowedStream, 否则就是StreamAll,
+      .filter( _.behavior != "UNINSTALL") //app渠道
+      //.map( data =>("dummyKey", data.userId)) //使用占位符号key
+      //.map(data => data.userId) //直接userId，也不keyBy了
+      .map( data => ("dummyKey", 1L) ) //Tuple2[[Tuple2], Long]
+      .keyBy(_._1) //keyBy在watermark分配之后，keyBy以后开窗就是WindowedStream, 否则就是StreamAll,
+      //.map(data =>(data.channel,data.behavior)) //干脆不要1L,直接WindowALl和sum，不需要process
       //几种window用法示例, keyBy以后开窗就是WindowedStream, 否则就是StreamAll
       //.windowAll(TumblingEventTimeWindows.of(Time.hours(1))) //这里只有一个key，无需keyBy
-      .timeWindowAll(Time.hours(1))
+      //.timeWindowAll(Time.hours(1),Time.seconds(10))
       //.timeWindow(Time.seconds(10))//10秒的滚动窗口,是window的简写
       //.timeWindow(Time.milliseconds(20))//毫秒单位，是window的简写
-      //.timeWindow(Time.hours(1))//滑动窗口,15s内，每隔5s
+      .timeWindow(Time.hours(1),Time.seconds(10))//滑动窗口,15s内，每隔5s
       //.window(SlidingEventTimeWindows.of(Time.seconds(15),Time.seconds(5),Time.hours(-8)))//滑动窗口, 多一个8hours的offset，时区
-      //.sum(1) //简单的聚合函数
-    //.reduce( (d1,d2) => (d1._1, d1._2 + d2._2 )) //keyBy以后同分区的id一样, reduce做增量聚合，reduce后返回DataStream
-    //这里除了做聚合, 还想指定输出格式, 使用aggregate,有几种形式，这里（预聚合，窗口函数），后面还要排序
-    //.aggregate( new CountAgge(), new WindowResultFunction() ) //除了reduce类似的增量聚合还有全窗口聚合,两个参数，一个聚合规则，一个输出数据结构
-    //.keyBy(_.windowEnd)//按照每个时间窗口分区
-    .apply( new UvCountByWindow() ) //聚合操作
-    //.process(new TopHotItem(3)) //窗口内排序
+      //.sum(1) //简单的聚合函数,不能处理复杂的业务逻辑，window time
+      //.reduce( (d1,d2) => (d1._1, d1._2 + d2._2 )) //keyBy以后同分区的id一样, reduce做增量聚合，reduce后返回DataStream
+      //这里除了做聚合, 还想指定输出格式, 使用aggregate,有几种形式，这里（预聚合，窗口函数），后面还要排序
+      .aggregate( new MarketCountAgg(), new MarketCountTotal() ) //可以预聚合，除了reduce类似的增量聚合还有全窗口聚合,两个参数，一个聚合规则，一个输出数据结构
+      //.keyBy(_.windowEnd)//按照每个时间窗口分区
+      //.apply( new UvCountByWindow() ) //聚合操作
+      //.trigger(new MyTrigger()) //不等到窗口关闭时操作聚合函数，而是主动触发关窗操作,案例用于bloom filter
+      //.process(new MarketingCount()) //窗口内排序
 
 
     //业务逻辑
@@ -145,22 +158,38 @@ object UserView {
     hotPerWindowStream.print("UV ") //没有输出，原因1,默认时间窗口按照process time而不是event time, 原因2，窗口时间太长，还没来得及关窗户计算程序就结束了
 
 
-
     //5. 执行
     env.execute("UV analysis")
+
   }
+}
+
+
+//用于aggregate，预聚合
+class MarketCountAgg() extends AggregateFunction[(String, Long),Long, Long]{//in, acc, out(聚合结果，不是输出结果)
+  override def createAccumulator(): Long = 0L
+
+  override def add(value: (String, Long), accumulator: Long): Long = value._2 + accumulator //或者accumulator + 1
+
+  override def getResult(accumulator: Long): Long = accumulator
+
+  override def merge(a: Long, b: Long): Long = a + b
+}
+
+//这里的in是上面的out， 就是聚合结果Long结果，不带key,流是keyBy以后TimeWindow
+//注意，这里WindowFunction容易倒错包，是org.apache.flink.streaming.api.scala下面的,不是org.apache.flink.streaming.api.functions下
+class MarketCountTotal() extends WindowFunction[Long, MarketingViewCount, String, TimeWindow]{ //in, out, key,window
+  def apply(key: String, window: TimeWindow, input: Iterable[Long], out: Collector[MarketingViewCount]): Unit = {
+    //里面可以去重，也可以排序
+    val startTs = new Timestamp(window.getStart).toString //窗口起始时间
+    val endTs = new Timestamp(window.getEnd).toString
+    //val channel = key._1
+    //val behavior = key._2
+    val count = input.iterator.next() //前面已经预聚合，这里input可迭代对象就包含一个合计数量了
+
+    out.collect(MarketingViewCount(startTs,endTs,"app marketing","total",count))
+  }
+
 
 }
 
-//需要带时间窗口信息
-class UvCountByWindow() extends AllWindowFunction[UserBehavior, UvCount, TimeWindow]{ //in, out, window，没有key
-
-  override def apply(window: TimeWindow, input: Iterable[UserBehavior], out: Collector[UvCount]): Unit = {
-    //保存所有数据并去重, 放入内存set中，内存不够使用不弄过滤器，或者预先聚合，
-    var idSet = Set[Long]() //如果内存不够，一个窗口内数据太多，使用布隆过滤器(bitmap思想，概率性的存在，选择合适的hash函数)
-    for(item <- input){
-      idSet += item.userId
-    }
-    out.collect(UvCount(window.getEnd, idSet.size))
-  }
-}
