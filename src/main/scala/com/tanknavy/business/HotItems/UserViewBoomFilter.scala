@@ -199,6 +199,7 @@ class Bloom(size: Long) { //int就可以代表20亿
 }
 
 //每来一个数据就要和redis拿当前窗口的bitmap比对，并更新count
+//ProcessWindowFunction
 // >hgetall UvCount
 class UvCountWithBloom() extends ProcessWindowFunction[(String, Long), UvCount, String, TimeWindow]{ //in, out, key, window
 //class UvCountWithBloom() extends ProcessAllWindowFunction[Long, UvCount, TimeWindow]{ //in, out, window, 没有keyBy就没有key
