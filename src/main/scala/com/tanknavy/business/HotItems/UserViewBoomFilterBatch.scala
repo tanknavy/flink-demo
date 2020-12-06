@@ -24,7 +24,7 @@ import scala.util.Random
 //之前set都在flink内存，关窗时再计算set size,速度快但数据量极大时内存消耗大
 //现在来一个处理一个(bitmap和windowEnd:Count在redis中)，每个要和redis读写更新, 空间小了，但是速度慢了
 //考虑不要来一个trigger对一个的处理，而是适当使用flink空间，来一批，平衡空间和时间
-object UserViewBoomFilter {
+object UserViewBoomFilterBatch {
   def main(args: Array[String]): Unit = {
     //1.环境env
     val env = StreamExecutionEnvironment.getExecutionEnvironment
@@ -190,7 +190,7 @@ class MyTriggerBatch() extends  Trigger[(String,Long), TimeWindow]{ //input(dumm
 }
 
 //布隆过滤器，bitmap多大
-class Bloom(size: Long) { //int就可以代表20亿
+class Bloom2(size: Long) { //int就可以代表20亿
  //位图大小
   private val cap = if(size >0) size else  1 << 27 //<<左移位，结果16M byte
 
