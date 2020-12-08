@@ -1,35 +1,35 @@
 package com.tanknavy.cep
 
+import java.util
 import java.util.Properties
 
-import com.tanknavy.business.market.AppMarket.getClass
-import com.tanknavy.business.market.{MarketCountAgg, MarketCountTotal, SimulatedEventSource}
+import com.tanknavy.business.market.SimulatedEventSource
 import org.apache.flink.api.common.serialization.SimpleStringSchema
-import org.apache.flink.api.common.state.{ListState, ListStateDescriptor}
+import org.apache.flink.api.scala.createTypeInformation
+import org.apache.flink.cep.{PatternSelectFunction, PatternTimeoutFunction}
+import org.apache.flink.cep.scala.CEP
+import org.apache.flink.cep.scala.pattern.Pattern
 import org.apache.flink.runtime.state.filesystem.FsStateBackend
 import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
+import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor
+import org.apache.flink.streaming.api.scala.{OutputTag, StreamExecutionEnvironment}
 import org.apache.flink.streaming.api.windowing.time.Time
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer011
-import org.apache.flink.api.scala.createTypeInformation
-import org.apache.flink.streaming.api.functions.{KeyedProcessFunction, ProcessFunction}
-import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor
-import org.apache.flink.util.Collector
-
-import scala.collection.mutable.ListBuffer
 
 /**
  * Author: Alex Cheng 12/5/2020 3:54 PM
- *
  */
 //复杂事件处理(Complex Event Processing, CEP),在无休止的事件流中检测事件模式，事件流通过一定的规则匹配，输出用户想得到的数据
 //处理事件的规则，叫做模式(Pattern）,Flink CEP提供了patter API
 
-//账户连续登陆失败检测
-case class LoginEvent(userId:Long, ip:String, eventType:String,  timestamp:Long)
-case class LoginWarning(userId:Long, firstFailTime:Long, lastFailTime:Long, warningMsg: String)
 
-object LoginFailDetect {
+//输入订单时间的样例类
+case class OrderEvent(orderId:Long, eventType:String, transactionId:String,  timestamp:Long)
+//输出结果样例类
+case class OrderResult(orderId:Long, resultgMsg: String)
+
+////订单状态，检测订单超时
+object OrderTimeoutCEP {
   def main(args: Array[String]): Unit = {
 
     //1.环境env
@@ -39,7 +39,7 @@ object LoginFailDetect {
 
     //时间语义,event time而不是默认的process time
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime) //指定事件time，记得还要指定如何抽取event time
-    env.getConfig.setAutoWatermarkInterval(500L) //默认200ms周期产生watermark
+    //env.getConfig.setAutoWatermarkInterval(500L) //默认200ms周期产生watermark
 
     //开启流状态的checkpoint容错机制，间隔时间，参数设置
     env.enableCheckpointing(60 * 1000) //间隔60s,
@@ -51,12 +51,12 @@ object LoginFailDetect {
     //2.source文件中读取
     //实际生产环境是kafka source->flink->kafka sink
     //2.1socket数据流
-    //val socketStream = env.socketTextStream("localhost", 7777) //linux:nc -lk 7777， window7：nc -lp 7777
+    val socketStream = env.socketTextStream("localhost", 7777) //linux:nc -lk 7777， window7：nc -lp 7777
 
     //2.2文本文件数据源
 
     //val streamFromFile = env.readTextFile("D:\\Code\\Java\\IDEA\\FlinkTutorial\\src\\main\\resources\\LoginLog.csv")
-    val resource = getClass.getResource("/LoginLog.csv") //文件使用相对路径
+    val resource = getClass.getResource("/OrderLog3.csv") //文件使用相对路径
     val streamFromFile = env.readTextFile(resource.getPath())
 
     //2.3自定义类型数据源
@@ -76,34 +76,35 @@ object LoginFailDetect {
 
 
     //3.1.基本转换算子和简单聚合算子, keyBy: DataStream -> KeyedStream, 然后可以agg/reduce
-    val dataStream = streamFromFile.map(
-    //val dataStream = socketStream.map(
+    //val dataStream = streamFromFile.map(
+    val dataStream = socketStream.map(
     //      val dataStream = mySourceStream.map(
     //      //val dataStream = kafkaStream
           data => {
             val dataArray = data.split(",")
     //        //SensorReading(dataArray(0).trim, dataArray(1).trim.toLong, dataArray(2).trim.toDouble).toString //为了方便序列化写到kafka
     //        UserBehavior(dataArray(0).trim.toLong, dataArray(1).trim.toLong, dataArray(2).trim.toInt, dataArray(3).trim, dataArray(4).trim.toLong)
-              LoginEvent(dataArray(0).trim.toLong, dataArray(1).trim, dataArray(2).trim, dataArray(3).trim.toLong)
+    //          LoginEvent(dataArray(0).trim.toLong, dataArray(1).trim, dataArray(2).trim, dataArray(3).trim.toLong)
+            OrderEvent(dataArray(0).trim.toLong, dataArray(1).trim, dataArray(2).trim, dataArray(3).trim.toLong)
           })
     //val dataStream = mySourceStream //无需map的数据源
       //watermark 三种格式的time assigner(升序，乱序),使用event time时如果使用 time assingner产生watermark
-      //.assignAscendingTimestamps(_.timestamp) //数据升序时，就不用watermark延迟触发，传入一个时间戳抽取器(毫秒)，到时间就触发不用延迟！
-    .assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor[LoginEvent](Time.seconds(5)) { //数据乱序1，传入等待时间, wm = maxEventTs - waitTime
-      override def extractTimestamp(t: LoginEvent): Long = t.timestamp * 1000
-    })
+      .assignAscendingTimestamps(_.timestamp * 1000L) //数据升序时，就不用watermark延迟触发，传入一个时间戳抽取器(毫秒)，到时间就触发不用延迟！
+    //.assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor[OrderEvent](Time.seconds(5)) { //数据乱序1，传入等待时间, wm = maxEventTs - waitTime
+      //override def extractTimestamp(t: OrderEvent): Long = t.timestamp * 1000
+    //})
     //.assignTimestampsAndWatermarks( new MyAssigner) //数据乱序2，自定义time assigner
 
     //3.2开窗,时间窗口[)左边包括，右边不包含,使用window和聚合处理，单这些不能实现业务时，使用更底层的ProcessFunction,
     // keyBy和TimeWindow顺序不一样，后面的聚合可能也不一样
     //3.2.1需求,
-    val hotPerWindowStream = dataStream //DataStream[SensorReading]
+    val orderEventStream = dataStream //DataStream[SensorReading]
       //.filter( _.behavior != "UNINSTALL") //app渠道
       //.map( data =>("dummyKey", data.userId)) //使用占位符号key
       //.map(data => data.userId) //直接userId，也不keyBy了
       //.map( data => ("dummyKey", 1L) ) //Tuple2[[Tuple2], Long]
       //用户登录连续失败检测
-      .keyBy(_.userId) //keyBy在watermark分配之后，keyBy以后开窗就是WindowedStream, 否则就是StreamAll,
+      .keyBy(_.orderId) //keyBy在watermark分配之后，keyBy以后开窗就是WindowedStream, 否则就是StreamAll,
       //.map(data =>(data.channel,data.behavior)) //干脆不要1L,直接WindowALl和sum，不需要process
       //几种window用法示例, keyBy以后开窗就是WindowedStream, 否则就是StreamAll
       //.windowAll(TumblingEventTimeWindows.of(Time.hours(1))) //这里只有一个key，无需keyBy
@@ -119,8 +120,27 @@ object LoginFailDetect {
     //.keyBy(_.windowEnd)//按照每个时间窗口分区
     //.apply( new UvCountByWindow() ) //聚合操作
     //.trigger(new MyTrigger()) //不等到窗口关闭时操作聚合函数，而是主动触发关窗操作,案例用于bloom filter
-    .process(new LoginWarningProcess(2,2)) //2秒内连续失败2次, 希望能更实时，2秒内超过n就开始报警，而不是一定等2s
+    //.process(new LoginWarningProcess(2,2)) //2秒内连续失败2次, 希望能更实时，2秒内超过n就开始报警，而不是一定等2s
      // .process(new LoginWarningProcess2(2,2)) //更实时，2秒内超过n就开始报警，而不是一定等2s，但只能2次
+
+    //使用CEP库,定义匹配模式
+    //两秒之内连续两次失败模式，如果多次呢,start后使用times(3)指定多次，还有optional, greedy,
+    //订单状态
+    // 疑问：能处理乱序的吗？ 看watermark
+    val orderPayPattern  = Pattern.begin[OrderEvent]("begin").where(_.eventType == "create") //订单创建到支持15分钟以内
+        //.next("second").where(_.eventType =="fail") //next严格近邻,followedBy宽松近邻，followedByAny非确定性宽松近邻(之前匹配过的也可以再次使用)
+      .followedBy("follow").where(_.eventType == "pay") //next严格近邻,followedBy宽松近邻，followedByAny非确定性宽松近邻(之前匹配过的也可以再次使用)
+        .within(Time.minutes(15))
+
+    //在事件流上应用pattern,得到一个pattern stream
+    val patterStream = CEP.pattern(orderEventStream, orderPayPattern)
+
+    //从pattern stream上应用select function, 检出匹配的事件薛烈
+    //不能使用notFollowedBy,因为它一不能用于结尾，二它检测两个事件之间没有发生， 使用超时匹配规则,sideOutput
+    var orderTimeOutputTag = new OutputTag[OrderResult]("orderTimeout")
+    // 超时事件
+    val resultStream = patterStream.select(orderTimeOutputTag, new OrderTimeoutSelect(), new OrderPaySelect()) //不符合的和符合的
+
 
     //业务逻辑
     //3.2.2需求: 10s秒内温度连续两次上升，window开窗和reduce都不能实现时，使用更底层的ProcessFunction,它可以访问watermark
@@ -160,118 +180,35 @@ object LoginFailDetect {
     //dataStream.addSink(new MyJdbcSink())
     //dataStream.print("data stream")
 
-    hotPerWindowStream.print("UV ") //没有输出，原因1,默认时间窗口按照process time而不是event time, 原因2，窗口时间太长，还没来得及关窗户计算程序就结束了
-
+    //hotPerWindowStream.print("UV ") //没有输出，原因1,默认时间窗口按照process time而不是event time, 原因2，窗口时间太长，还没来得及关窗户计算程序就结束了
+    resultStream.print("order paid")
+    resultStream.getSideOutput(orderTimeOutputTag).print("order timeout") //超时的，side output
 
     //5. 执行
-    env.execute("UV analysis")
-  }
-}
-
-//处理Keyed Stream, 实现KeyedProcessFunction
-//状态编程，2秒内连续登录失败几次，就触发警告，使用onTimer定时器
-//bug: 基于onTimer的fail/fail/fail/ok不会报警(最后一个ok清空了)， 2秒内大量fail但还 fail/ok/fail/fail会报警(后面2次触发是要2秒后报警)
-//希望2秒内，只要超过阈值就报警
-class LoginWarningProcess(timeGapSeconds:Int, maxFailTimes: Int) extends KeyedProcessFunction[Long, LoginEvent, LoginWarning]{ //key, in, out
-  //定义状态，保存2秒内的所有登录失败事件
-  lazy val loginFailState: ListState[LoginEvent] = getRuntimeContext.getListState(new ListStateDescriptor[LoginEvent]("login-state",classOf[LoginEvent]))
-  //定时器时间戳,不用，因为要在onTimer中再判断是否报警
-
-  override def processElement(value: LoginEvent, ctx: KeyedProcessFunction[Long, LoginEvent, LoginWarning]#Context, out: Collector[LoginWarning]): Unit = {
-    val loginFailList = loginFailState.get() //返回是Iterable类型
-
-    //来一个事件判断一个状态，只添加fail的事件
-    if(value.eventType == "fail"){//如果这次登陆失败,并且loginFaileState是初始值，那么可以注册一个定时器了
-      if(!loginFailList.iterator().hasNext){//如果没有值，第一次失败注册一个定时器，用于触发
-        ctx.timerService().registerEventTimeTimer(value.timestamp * 1000L + timeGapSeconds * 1000L) //几秒钟后触发,定时器单位毫秒
-      }
-      loginFailState.add(value)
-    }else { //如果这次登陆成功清空状态, bug:报警)，fail/fail/fail/ok不会报警(最后一个ok清空了)， 2秒内大量fail但还 fail/ok/fail/fail会报警(后面2次触发是要2秒后报警
-      loginFailState.clear()
-    }
-
-  }
-
-  //定时器触发时操作
-  override def onTimer(timestamp: Long, ctx: KeyedProcessFunction[Long, LoginEvent, LoginWarning]#OnTimerContext, out: Collector[LoginWarning]): Unit = {
-    val allLoginFails: ListBuffer[LoginEvent] = new ListBuffer[LoginEvent]
-    val iter = loginFailState.get().iterator() //迭代器
-    while(iter.hasNext){
-      allLoginFails += iter.next()
-    }
-
-    //连续失败几次了, ctx可以拿到信息
-    if(allLoginFails.length >= maxFailTimes){
-      //主输出流
-      out.collect(LoginWarning(allLoginFails.head.userId, allLoginFails.head.timestamp, allLoginFails.last.timestamp,
-        "login failed " + maxFailTimes + " in " + timeGapSeconds + " s!"))
-    }
-    //清空状态
-    loginFailState.clear()
-
+    env.execute("order timeout")
   }
 }
 
 
-//优化上述问题2秒2次登陆失败，这次失败和上次失败时间戳比较(只能判断连续2次)，如果2秒内失败则报警，但是如果要求2秒失败3次以上呢？
-//bug: 只能2次, 不能处理乱序时间
-class LoginWarningProcess2(timeGapSeconds:Int, maxFailTimes: Int) extends KeyedProcessFunction[Long, LoginEvent, LoginWarning]{ //key, in, out
-  //定义状态，保存2秒内的所有登录失败事件
-  lazy val loginFailState: ListState[LoginEvent] = getRuntimeContext.getListState(new ListStateDescriptor[LoginEvent]("login-state",classOf[LoginEvent]))
-  //定时器时间戳
+//CEP模式匹配后选择, create和pay， 这里更关系不符合条件的，即在15分钟没有完成pay的order，
+// 不能使用notFollowedBy,因为它一不能用于结尾，二它检测两个事件之间没有发生， 使用超时匹配规则,sideOutput
+class OrderTimeoutSelect() extends PatternTimeoutFunction[OrderEvent, OrderResult]{ //in,out
+  override def timeout(map: util.Map[String, util.List[OrderEvent]], l: Long): OrderResult = {
+    //从map中按照名称取出对应的事件
+    val createEvent = map.get("begin").iterator().next() //订单创建
+    //val payEvent = map.get("follow").iterator().next() //超时，所以没有后续的follow
 
-  override def processElement(value: LoginEvent, ctx: KeyedProcessFunction[Long, LoginEvent, LoginWarning]#Context, out: Collector[LoginWarning]): Unit = {
-//    val loginFailList = loginFailState.get() //返回是Iterable类型
-//
-//    //来一个事件判断一个状态，只添加fail的事件
-//    if(value.eventType == "fail"){//如果这次登陆失败,并且loginFaileState是初始值，那么可以注册一个定时器了
-//      if(!loginFailList.iterator().hasNext){//如果没有值，第一次失败注册一个定时器，用于触发
-//        ctx.timerService().registerEventTimeTimer(value.timestamp * 1000L + timeGapSeconds * 1000L) //几秒钟后触发,定时器单位毫秒
-//      }
-//      loginFailState.add(value)
-//    }else { //如果这次登陆成功清空状态, bug:报警)，fail/fail/fail/ok不会报警(最后一个ok清空了)， 2秒内大量fail但还 fail/ok/fail/fail会报警(后面2次触发是要2秒后报警
-//      loginFailState.clear()
-//    }
-
-    if(value.eventType == "fail"){
-      //如果是失败，判断之前是否有登陆失败事件
-      val iter = loginFailState.get().iterator()
-      if(iter.hasNext){ //如果已经有登陆失败事件，就比较事件时间，注:这个只适合检查连续2次失败，因为它只比较最近两个
-        val firstFail = iter.next()
-        if(value.timestamp < firstFail.timestamp + timeGapSeconds){ //n秒失败2次，如果时间乱序呢？这种判断不行!!!,考虑使用onTimer利用watermark+延时
-          //如果两次间隔小于2秒，输出报警
-          out.collect(LoginWarning(value.userId, firstFail.timestamp, value.timestamp, "login failed 2 times in 2s"))
-        }
-        //更新为最近一次fail,保存在状态里
-        loginFailState.clear()
-        loginFailState.add(value)
-      }else{ //第一次登陆失败
-        loginFailState.add(value)
-      }
-    }else{ //成功就清空状态
-      loginFailState.clear()
-    }
-
+    OrderResult(createEvent.orderId, "timeout")
   }
-
-  //定时器触发时操作
-/*  override def onTimer(timestamp: Long, ctx: KeyedProcessFunction[Long, LoginEvent, LoginWarning]#OnTimerContext, out: Collector[LoginWarning]): Unit = {
-    val allLoginFails: ListBuffer[LoginEvent] = new ListBuffer[LoginEvent]
-    val iter = loginFailState.get().iterator() //迭代器
-    while(iter.hasNext){
-      allLoginFails += iter.next()
-    }
-
-    //连续失败几次了, ctx可以拿到信息
-    if(allLoginFails.length >= maxFailTimes){
-      //主输出流
-      out.collect(LoginWarning(allLoginFails.head.userId, allLoginFails.head.timestamp, allLoginFails.last.timestamp,
-        "login failed " + maxFailTimes + " in " + timeGapSeconds + " s!"))
-    }
-    //清空状态
-    loginFailState.clear()
-  }*/
-
 }
 
+//匹配的事件处理
+class OrderPaySelect() extends  PatternSelectFunction[OrderEvent, OrderResult]{ //in,out
+  override def select(map: util.Map[String, util.List[OrderEvent]]): OrderResult = { //检测到所有的事件序列，这里有begin和next两次fail事件
+    //从map中按照名称取出对应的事件
+    //val createEvent = map.get("begin").iterator().next() //
+    val payEvent = map.get("follow").iterator().next() //限时支付成功
 
+    OrderResult(payEvent.orderId, "order paid within 15 minutes")
+  }
+}

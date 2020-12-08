@@ -64,6 +64,7 @@ object TransformTest {
     // Connect: DataStream,DataStream ->ConnectedStreams, 流数据类型可以不一样，一次两条流，同流但不合污，一国两制
     // CoMap, CoFlatMap: ConnectedStreams -> DataStream //
     // Union: DataStream, DataStream ->DataStream //包含所有DataStream的元素的新DataStream, 流数据类型必须一样，可以多条流合并
+    // Join:
     val warningStream = high30.map( data => (data.id, data.temperature))
     val connectedStreams = warningStream.connect(low30) //两个流数据类型不一样[String, Double), SensorReading]，一个是Tuple2,一个是SensorReading, 返回ConnectedStreams
 

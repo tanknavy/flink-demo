@@ -1,35 +1,32 @@
 package com.tanknavy.cep
 
+import java.util
 import java.util.Properties
 
-import com.tanknavy.business.market.AppMarket.getClass
-import com.tanknavy.business.market.{MarketCountAgg, MarketCountTotal, SimulatedEventSource}
+import com.tanknavy.business.market.SimulatedEventSource
 import org.apache.flink.api.common.serialization.SimpleStringSchema
-import org.apache.flink.api.common.state.{ListState, ListStateDescriptor}
+import org.apache.flink.api.scala.createTypeInformation
+import org.apache.flink.cep.PatternSelectFunction
+import org.apache.flink.cep.scala.CEP
+import org.apache.flink.cep.scala.pattern.Pattern
 import org.apache.flink.runtime.state.filesystem.FsStateBackend
 import org.apache.flink.streaming.api.TimeCharacteristic
+import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
 import org.apache.flink.streaming.api.windowing.time.Time
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer011
-import org.apache.flink.api.scala.createTypeInformation
-import org.apache.flink.streaming.api.functions.{KeyedProcessFunction, ProcessFunction}
-import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor
-import org.apache.flink.util.Collector
-
-import scala.collection.mutable.ListBuffer
 
 /**
  * Author: Alex Cheng 12/5/2020 3:54 PM
- *
  */
 //复杂事件处理(Complex Event Processing, CEP),在无休止的事件流中检测事件模式，事件流通过一定的规则匹配，输出用户想得到的数据
 //处理事件的规则，叫做模式(Pattern）,Flink CEP提供了patter API
 
-//账户连续登陆失败检测
-case class LoginEvent(userId:Long, ip:String, eventType:String,  timestamp:Long)
-case class LoginWarning(userId:Long, firstFailTime:Long, lastFailTime:Long, warningMsg: String)
+//账户连续登陆失败检车
+//case class LoginEvent(userId:Long, ip:String, eventType:String,  timestamp:Long)
+//case class LoginWarning(userId:Long, firstFailTime:Long, lastFailTime:Long, warningMsg: String)
 
-object LoginFailDetect {
+object LoginFailDetectCEP {
   def main(args: Array[String]): Unit = {
 
     //1.环境env
@@ -97,7 +94,7 @@ object LoginFailDetect {
     //3.2开窗,时间窗口[)左边包括，右边不包含,使用window和聚合处理，单这些不能实现业务时，使用更底层的ProcessFunction,
     // keyBy和TimeWindow顺序不一样，后面的聚合可能也不一样
     //3.2.1需求,
-    val hotPerWindowStream = dataStream //DataStream[SensorReading]
+    val loginEventStream = dataStream //DataStream[SensorReading]
       //.filter( _.behavior != "UNINSTALL") //app渠道
       //.map( data =>("dummyKey", data.userId)) //使用占位符号key
       //.map(data => data.userId) //直接userId，也不keyBy了
@@ -119,8 +116,21 @@ object LoginFailDetect {
     //.keyBy(_.windowEnd)//按照每个时间窗口分区
     //.apply( new UvCountByWindow() ) //聚合操作
     //.trigger(new MyTrigger()) //不等到窗口关闭时操作聚合函数，而是主动触发关窗操作,案例用于bloom filter
-    .process(new LoginWarningProcess(2,2)) //2秒内连续失败2次, 希望能更实时，2秒内超过n就开始报警，而不是一定等2s
+    //.process(new LoginWarningProcess(2,2)) //2秒内连续失败2次, 希望能更实时，2秒内超过n就开始报警，而不是一定等2s
      // .process(new LoginWarningProcess2(2,2)) //更实时，2秒内超过n就开始报警，而不是一定等2s，但只能2次
+
+    //使用CEP库,定义匹配模式
+    //两秒之内连续两次失败模式，如果多次呢,start后使用times(3)指定多次，还有optional, greedy,
+    // 疑问：能处理乱序的吗？ 看watermark
+    val loginFailPattern  = Pattern.begin[LoginEvent]("begin").where(_.eventType == "fail")
+        .next("second").where(_.eventType =="fail") //next严格近邻,followedBy宽松近邻，followedByAny非确定性宽松近邻(之前匹配过的也可以再次使用)
+        .within(Time.seconds(2))
+    //在事件流上应用pattern,得到一个pattern stream
+    val patterStream = CEP.pattern(loginEventStream, loginFailPattern)
+
+    //从pattern stream上应用select function, 检出匹配的事件薛烈
+    val loginFailDataStream = patterStream.select(new LoginFailMatch()) //连续两次失败，所以有两种事件
+
 
     //业务逻辑
     //3.2.2需求: 10s秒内温度连续两次上升，window开窗和reduce都不能实现时，使用更底层的ProcessFunction,它可以访问watermark
@@ -160,118 +170,21 @@ object LoginFailDetect {
     //dataStream.addSink(new MyJdbcSink())
     //dataStream.print("data stream")
 
-    hotPerWindowStream.print("UV ") //没有输出，原因1,默认时间窗口按照process time而不是event time, 原因2，窗口时间太长，还没来得及关窗户计算程序就结束了
-
+    //hotPerWindowStream.print("UV ") //没有输出，原因1,默认时间窗口按照process time而不是event time, 原因2，窗口时间太长，还没来得及关窗户计算程序就结束了
+    loginFailDataStream.print("login fail")
 
     //5. 执行
     env.execute("UV analysis")
   }
 }
 
-//处理Keyed Stream, 实现KeyedProcessFunction
-//状态编程，2秒内连续登录失败几次，就触发警告，使用onTimer定时器
-//bug: 基于onTimer的fail/fail/fail/ok不会报警(最后一个ok清空了)， 2秒内大量fail但还 fail/ok/fail/fail会报警(后面2次触发是要2秒后报警)
-//希望2秒内，只要超过阈值就报警
-class LoginWarningProcess(timeGapSeconds:Int, maxFailTimes: Int) extends KeyedProcessFunction[Long, LoginEvent, LoginWarning]{ //key, in, out
-  //定义状态，保存2秒内的所有登录失败事件
-  lazy val loginFailState: ListState[LoginEvent] = getRuntimeContext.getListState(new ListStateDescriptor[LoginEvent]("login-state",classOf[LoginEvent]))
-  //定时器时间戳,不用，因为要在onTimer中再判断是否报警
 
-  override def processElement(value: LoginEvent, ctx: KeyedProcessFunction[Long, LoginEvent, LoginWarning]#Context, out: Collector[LoginWarning]): Unit = {
-    val loginFailList = loginFailState.get() //返回是Iterable类型
-
-    //来一个事件判断一个状态，只添加fail的事件
-    if(value.eventType == "fail"){//如果这次登陆失败,并且loginFaileState是初始值，那么可以注册一个定时器了
-      if(!loginFailList.iterator().hasNext){//如果没有值，第一次失败注册一个定时器，用于触发
-        ctx.timerService().registerEventTimeTimer(value.timestamp * 1000L + timeGapSeconds * 1000L) //几秒钟后触发,定时器单位毫秒
-      }
-      loginFailState.add(value)
-    }else { //如果这次登陆成功清空状态, bug:报警)，fail/fail/fail/ok不会报警(最后一个ok清空了)， 2秒内大量fail但还 fail/ok/fail/fail会报警(后面2次触发是要2秒后报警
-      loginFailState.clear()
-    }
-
-  }
-
-  //定时器触发时操作
-  override def onTimer(timestamp: Long, ctx: KeyedProcessFunction[Long, LoginEvent, LoginWarning]#OnTimerContext, out: Collector[LoginWarning]): Unit = {
-    val allLoginFails: ListBuffer[LoginEvent] = new ListBuffer[LoginEvent]
-    val iter = loginFailState.get().iterator() //迭代器
-    while(iter.hasNext){
-      allLoginFails += iter.next()
-    }
-
-    //连续失败几次了, ctx可以拿到信息
-    if(allLoginFails.length >= maxFailTimes){
-      //主输出流
-      out.collect(LoginWarning(allLoginFails.head.userId, allLoginFails.head.timestamp, allLoginFails.last.timestamp,
-        "login failed " + maxFailTimes + " in " + timeGapSeconds + " s!"))
-    }
-    //清空状态
-    loginFailState.clear()
-
+//CEP模式匹配后选择, 第一次fail和第二次fail
+class LoginFailMatch() extends  PatternSelectFunction[LoginEvent, LoginWarning]{ //in,out
+  override def select(map: util.Map[String, util.List[LoginEvent]]): LoginWarning = { //检测到所有的事件序列，这里有begin和next两次fail事件
+    //从map中按照名称取出对应的事件
+    val firstFail = map.get("begin").iterator().next() //满足条件的第一次事假
+    val secondFail = map.get("second").iterator().next()
+    LoginWarning(firstFail.userId, firstFail.timestamp, secondFail.timestamp, "login fail 2 times within 2 second")
   }
 }
-
-
-//优化上述问题2秒2次登陆失败，这次失败和上次失败时间戳比较(只能判断连续2次)，如果2秒内失败则报警，但是如果要求2秒失败3次以上呢？
-//bug: 只能2次, 不能处理乱序时间
-class LoginWarningProcess2(timeGapSeconds:Int, maxFailTimes: Int) extends KeyedProcessFunction[Long, LoginEvent, LoginWarning]{ //key, in, out
-  //定义状态，保存2秒内的所有登录失败事件
-  lazy val loginFailState: ListState[LoginEvent] = getRuntimeContext.getListState(new ListStateDescriptor[LoginEvent]("login-state",classOf[LoginEvent]))
-  //定时器时间戳
-
-  override def processElement(value: LoginEvent, ctx: KeyedProcessFunction[Long, LoginEvent, LoginWarning]#Context, out: Collector[LoginWarning]): Unit = {
-//    val loginFailList = loginFailState.get() //返回是Iterable类型
-//
-//    //来一个事件判断一个状态，只添加fail的事件
-//    if(value.eventType == "fail"){//如果这次登陆失败,并且loginFaileState是初始值，那么可以注册一个定时器了
-//      if(!loginFailList.iterator().hasNext){//如果没有值，第一次失败注册一个定时器，用于触发
-//        ctx.timerService().registerEventTimeTimer(value.timestamp * 1000L + timeGapSeconds * 1000L) //几秒钟后触发,定时器单位毫秒
-//      }
-//      loginFailState.add(value)
-//    }else { //如果这次登陆成功清空状态, bug:报警)，fail/fail/fail/ok不会报警(最后一个ok清空了)， 2秒内大量fail但还 fail/ok/fail/fail会报警(后面2次触发是要2秒后报警
-//      loginFailState.clear()
-//    }
-
-    if(value.eventType == "fail"){
-      //如果是失败，判断之前是否有登陆失败事件
-      val iter = loginFailState.get().iterator()
-      if(iter.hasNext){ //如果已经有登陆失败事件，就比较事件时间，注:这个只适合检查连续2次失败，因为它只比较最近两个
-        val firstFail = iter.next()
-        if(value.timestamp < firstFail.timestamp + timeGapSeconds){ //n秒失败2次，如果时间乱序呢？这种判断不行!!!,考虑使用onTimer利用watermark+延时
-          //如果两次间隔小于2秒，输出报警
-          out.collect(LoginWarning(value.userId, firstFail.timestamp, value.timestamp, "login failed 2 times in 2s"))
-        }
-        //更新为最近一次fail,保存在状态里
-        loginFailState.clear()
-        loginFailState.add(value)
-      }else{ //第一次登陆失败
-        loginFailState.add(value)
-      }
-    }else{ //成功就清空状态
-      loginFailState.clear()
-    }
-
-  }
-
-  //定时器触发时操作
-/*  override def onTimer(timestamp: Long, ctx: KeyedProcessFunction[Long, LoginEvent, LoginWarning]#OnTimerContext, out: Collector[LoginWarning]): Unit = {
-    val allLoginFails: ListBuffer[LoginEvent] = new ListBuffer[LoginEvent]
-    val iter = loginFailState.get().iterator() //迭代器
-    while(iter.hasNext){
-      allLoginFails += iter.next()
-    }
-
-    //连续失败几次了, ctx可以拿到信息
-    if(allLoginFails.length >= maxFailTimes){
-      //主输出流
-      out.collect(LoginWarning(allLoginFails.head.userId, allLoginFails.head.timestamp, allLoginFails.last.timestamp,
-        "login failed " + maxFailTimes + " in " + timeGapSeconds + " s!"))
-    }
-    //清空状态
-    loginFailState.clear()
-  }*/
-
-}
-
-
