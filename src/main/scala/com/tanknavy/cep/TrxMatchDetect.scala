@@ -3,15 +3,14 @@ package com.tanknavy.cep
 import java.util.Properties
 
 import com.tanknavy.business.market.SimulatedEventSource
-import com.tanknavy.cep.OrderTimeoutState.{OrderPayMatch, getClass, orderTimeoutTag}
 import org.apache.flink.api.common.serialization.SimpleStringSchema
-import org.apache.flink.api.common.state.{StateDescriptor, ValueState, ValueStateDescriptor}
+import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
+import org.apache.flink.api.scala.createTypeInformation
 import org.apache.flink.runtime.state.filesystem.FsStateBackend
 import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.api.scala.createTypeInformation
-import org.apache.flink.streaming.api.functions.KeyedProcessFunction
-import org.apache.flink.streaming.api.functions.co.CoProcessFunction
+import org.apache.flink.streaming.api.functions.co.{CoProcessFunction, ProcessJoinFunction}
 import org.apache.flink.streaming.api.scala.{OutputTag, StreamExecutionEnvironment}
+import org.apache.flink.streaming.api.windowing.time.Time
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer011
 import org.apache.flink.util.Collector
 
@@ -26,7 +25,7 @@ import org.apache.flink.util.Collector
 //case class OrderEvent(orderId:Long, eventType:String, transactionId:String,  timestamp:Long)
 case class ReceiptEvent(transactionId:String, payChannel:String, eventTime:Long)
 
-
+//多流合并时，除了watermark[延迟]，onTimer时间，watermark和最慢的流相关!
 object TrxMatchDetect {
 
   //非主流，取代split使用定义侧数据流tag， 支付和收据两条流的匹配
@@ -56,6 +55,7 @@ object TrxMatchDetect {
     //实际生产环境是kafka source->flink->kafka sink
     //2.1socket数据流
     val socketStream = env.socketTextStream("localhost", 7777) //linux:nc -lk 7777， window7：nc -lp 7777
+    val socketStream2 = env.socketTextStream("localhost", 7778) //linux:nc -lk 7777， window7：nc -lp 7777
 
     //2.2文本文件数据源
 
@@ -200,14 +200,24 @@ object TrxMatchDetect {
     //orderEventStream.print("order stream")
     //orderEventStream.getSideOutput(orderTimeoutTag).print("order timeout") //使用侧输出流
     //receiptEventStream.print("receipt stream")
-    //两条流连接起来，共同处理， connect可以是不同类型的流，union可以多流但是类型必须相同
-    val processedStream = orderEventStream.connect(receiptEventStream).process(new TrxPayMatch())
+    //两条流连接起来，共同处理，
+    // connect可以是不同类型的流，union可以多流但是类型必须相同
+    // join，window join(相同key和window的笛卡尔积),interval join(lower bound--upper bound,区间的元素当做状态)，没有side output
+    //方法一，使用connect
+    //val processedStream = orderEventStream.connect(receiptEventStream).process(new TrxPayMatch())
+
+    //方法二, 使用interval join,两个个流都已经keyBy过了, 这种方法不能输出side output
+    val processedStream = orderEventStream
+      .intervalJoin(receiptEventStream)
+      .between(Time.seconds(-5),Time.seconds(5)) //上下限，左边流事件对应多大范围内右边流事件
+      .process(new TrxPayMatchJoin())
 
     //orderEventStream.print("order")
     //receiptEventStream.print("receipt")
     processedStream.print("matched stream")
     processedStream.getSideOutput(unmatchPay).print("unmatchPay")
     processedStream.getSideOutput(unmatchReceipt).print("unmatchReceipt")
+
 
     //resultStream.print("order paid")
     //resultStream.getSideOutput(orderTimeOutputTag).print("order timeout") //超时的，side output
@@ -217,6 +227,7 @@ object TrxMatchDetect {
   }
 
   //处理connected stream, 两个不同数据类型的输入，一个输出， 已经按照keyBy处理过的两条流
+  //
   class TrxPayMatch() extends CoProcessFunction[OrderEvent, ReceiptEvent, (OrderEvent, ReceiptEvent)]{ //in1,in2, out
     //双流保存什么状态，已经到达的订单支付事件和到账事件
     lazy val payState: ValueState[OrderEvent] = getRuntimeContext.getState(new ValueStateDescriptor[OrderEvent]("pay-state", classOf[OrderEvent]))
@@ -262,6 +273,17 @@ object TrxMatchDetect {
 
     }
   }
+
+
+  //interval join流的处理, 这种方法不能输出side output, 适合比如温度报警，烟雾报警两个都满足
+  class TrxPayMatchJoin() extends ProcessJoinFunction[OrderEvent, ReceiptEvent, (OrderEvent, ReceiptEvent)]{ //in1,in2,out
+
+    override def processElement(left: OrderEvent, right: ReceiptEvent, ctx: ProcessJoinFunction[OrderEvent, ReceiptEvent, (OrderEvent, ReceiptEvent)]#Context, out: Collector[(OrderEvent, ReceiptEvent)]): Unit = {
+      //有ctx，可以拿到key, watermark
+      out.collect((left, right))
+    }
+  }
+
 
 }
 

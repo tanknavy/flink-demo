@@ -1,6 +1,10 @@
 Flink DataSet and DataStream
 Flink for e-commerce
 
+技术总结： process， state， onTimer定时器，
+典型实现：广告黑名单过滤， 布隆过滤
+bug:OrderTimeoutState中onTimer在读取文件测试数据中没有如期执行
+
 flink start:
 cd c:\software\flink-1.7.2
 start-cluster.bat
